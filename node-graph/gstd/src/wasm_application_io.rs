@@ -189,6 +189,13 @@ async fn render_canvas(
 
 	// TODO: Instead of applying the transform here, pass the transform during the translation to avoid the O(n) cost
 	scene.append(&child, Some(kurbo::Affine::new(footprint.transform.to_cols_array())));
+	//let canvas_transform = kurbo::Affine::new([0.1, 0., 0., 0.1, 0., 0.]);
+	//scene.append(&child, Some(canvas_transform));
+
+	log::debug!("Data Type: {}", std::any::type_name_of_val(&data));
+	if let Some(dimensions) = data.artboard_dimensions() {
+		log::debug!("Got dimensions: {:?}", dimensions);
+	}
 
 	let mut background = Color::from_rgb8_srgb(0x22, 0x22, 0x22);
 	if !data.contains_artboard() && !render_config.hide_artboards {

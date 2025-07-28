@@ -2,7 +2,7 @@ use crate::render_ext::RenderExt;
 use crate::to_peniko::BlendModeExt;
 use bezier_rs::Subpath;
 use dyn_any::DynAny;
-use glam::{DAffine2, DVec2};
+use glam::{DAffine2, DVec2, IVec2, UVec2};
 use graphene_core::blending::BlendMode;
 use graphene_core::bounds::BoundingBox;
 use graphene_core::color::Color;
@@ -231,6 +231,12 @@ pub trait GraphicElementRendered: BoundingBox + RenderComplexity {
 		false
 	}
 
+	// Returns a Vec2 of the dimensions of the artboard, if a child of this element is an
+	// artboard
+	fn artboard_dimensions(&self) -> Option<IVec2> {
+		None
+	}
+
 	fn new_ids_from_hash(&mut self, _reference: Option<NodeId>) {}
 }
 
@@ -399,6 +405,14 @@ impl GraphicElementRendered for Table<GraphicElement> {
 
 	fn contains_artboard(&self) -> bool {
 		self.iter_ref().any(|row| row.element.contains_artboard())
+	}
+
+	fn artboard_dimensions(&self) -> Option<IVec2> {
+		self.instance_ref_iter()
+			.map(|instance| instance.instance.artboard_dimensions())
+			.filter(|size| size.is_some())
+			.map(|size| size.expect("size was none!"))
+			.next()
 	}
 
 	fn new_ids_from_hash(&mut self, _reference: Option<NodeId>) {
@@ -905,6 +919,10 @@ impl GraphicElementRendered for Artboard {
 	fn contains_artboard(&self) -> bool {
 		true
 	}
+
+	fn artboard_dimensions(&self) -> Option<IVec2> {
+		Some(self.dimensions)
+	}
 }
 
 impl GraphicElementRendered for Table<Artboard> {
@@ -935,6 +953,15 @@ impl GraphicElementRendered for Table<Artboard> {
 
 	fn contains_artboard(&self) -> bool {
 		self.iter_ref().count() > 0
+	}
+
+	// Gets the dimensions of the first artboard in group
+	fn artboard_dimensions(&self) -> Option<IVec2> {
+		if let Some(artboard_instance_ref) = self.instance_ref_iter().next() {
+			artboard_instance_ref.instance.artboard_dimensions()
+		} else {
+			None
+		}
 	}
 }
 
@@ -1213,6 +1240,27 @@ impl GraphicElementRendered for GraphicElement {
 			GraphicElement::GraphicGroup(graphic_group) => graphic_group.contains_artboard(),
 			GraphicElement::RasterDataCPU(raster) => raster.contains_artboard(),
 			GraphicElement::RasterDataGPU(raster) => raster.contains_artboard(),
+		}
+	}
+
+	fn artboard_dimensions(&self) -> Option<IVec2> {
+		match self {
+			GraphicElement::VectorData(vector_data) => {
+				log::debug!("Getting artboard dimensions from vector_data");
+				vector_data.artboard_dimensions()
+			}
+			GraphicElement::GraphicGroup(graphic_group) => {
+				log::debug!("Getting artboard dimensions from graphic group");
+				graphic_group.artboard_dimensions()
+			}
+			GraphicElement::RasterDataCPU(raster) => {
+				log::debug!("Getting artboard dimensions from raster data CPU");
+				raster.artboard_dimensions()
+			}
+			GraphicElement::RasterDataGPU(raster) => {
+				log::debug!("Getting artboard dimensions from raster data GPU");
+				raster.artboard_dimensions()
+			}
 		}
 	}
 
