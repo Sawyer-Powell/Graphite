@@ -5,13 +5,17 @@ use anyhow::Result;
 pub use context::Context;
 use dyn_any::StaticType;
 use futures::lock::Mutex;
-use glam::UVec2;
+use glam::{IVec2, UVec2};
 use graphene_application_io::{ApplicationIo, EditorApi, SurfaceHandle, SurfaceId};
+use graphene_core::num_traits::{clamp_max, clamp_min};
+use graphene_core::transform::{Footprint, Transform};
 use graphene_core::{Color, Ctx};
 pub use graphene_svg_renderer::RenderContext;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
+use vello::low_level::Render;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 use wgpu::util::TextureBlitter;
+use wgpu::wgt::TextureViewDescriptor;
 use wgpu::{Origin3d, SurfaceConfiguration, TextureAspect};
 
 #[derive(dyn_any::DynAny)]
@@ -58,6 +62,191 @@ unsafe impl StaticType for Surface {
 const VELLO_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 impl WgpuExecutor {
+	pub async fn render_vello_scene_view_mode_pixels(
+		&self,
+		artboard_dimensions: IVec2,
+		scene: &Scene,
+		surface: &WgpuSurface,
+		footprint: Footprint,
+		context: &RenderContext,
+		background: Color,
+	) -> Result<()> {
+		let artboard_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
+			label: Some("artboard texture"),
+			size: wgpu::Extent3d {
+				width: artboard_dimensions.x as u32,
+				height: artboard_dimensions.y as u32,
+				depth_or_array_layers: 1,
+			},
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+			format: VELLO_SURFACE_FORMAT,
+			view_formats: &[],
+		});
+
+		let artboard_texture_view = artboard_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+		let [r, g, b, _] = background.to_rgba8_srgb();
+		let artboard_render_params = RenderParams {
+			base_color: vello::peniko::Color::from_rgba8(r, g, b, 0xff),
+			width: artboard_dimensions.x as u32,
+			height: artboard_dimensions.y as u32,
+			antialiasing_method: AaConfig::Msaa16,
+		};
+
+		{
+			let mut renderer = self.vello_renderer.lock().await;
+			for (image, texture) in context.resource_overrides.iter() {
+				let texture_view = wgpu::TexelCopyTextureInfoBase {
+					texture: texture.clone(),
+					mip_level: 0,
+					origin: Origin3d::ZERO,
+					aspect: TextureAspect::All,
+				};
+				renderer.override_image(image, Some(texture_view));
+			}
+			renderer.render_to_texture(&self.context.device, &self.context.queue, scene, &artboard_texture_view, &artboard_render_params)?;
+			for (image, _) in context.resource_overrides.iter() {
+				renderer.override_image(image, None);
+			}
+		}
+
+		let surface_inner = &surface.surface.inner;
+		let surface_caps = surface_inner.get_capabilities(&self.context.adapter);
+		surface_inner.configure(
+			&self.context.device,
+			&SurfaceConfiguration {
+				usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST,
+				format: VELLO_SURFACE_FORMAT,
+				width: footprint.resolution.x,
+				height: footprint.resolution.y,
+				present_mode: surface_caps.present_modes[0],
+				alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+				view_formats: vec![],
+				desired_maximum_frame_latency: 2,
+			},
+		);
+
+		#[repr(C)]
+		#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+		struct Vertex {
+			positions: [f32; 2],
+		}
+
+		#[repr(C)]
+		#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+		struct Transform {
+			transform: [[f32; 3]; 2],
+		}
+
+		impl From<glam::DAffine2> for Transform {
+			fn from(affine: glam::DAffine2) -> Self {
+				let mat = affine.to_cols_array();
+				Self {
+					transform: [[mat[0] as f32, mat[1] as f32, mat[2] as f32], [mat[3] as f32, mat[4] as f32, mat[5] as f32]],
+				}
+			}
+		}
+
+		let vs_module = self.context.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+			label: Some("Transform Vertex"),
+			source: wgpu::ShaderSource::Wgsl(
+				r#"
+				@group(0) @binding(0) var<uniform> affine_transform: mat2x3<f32>;
+
+				struct VertexOutput {
+					@builtin(position) clip_position: vec4<f32>,
+					@location(0) uv: vec2<f32>,
+				}
+
+				@vertex
+				fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
+					var out: VertexOutput;
+					let transformed = affine_transform * vec3<f32>(position, 1.0);
+					out.clip_position = vec4<f32>(transformed, 0.0, 1.0);
+					out.uv = (position + 1.0) * 0.5;
+					return out
+				}
+				"#
+				.into(),
+			),
+		});
+
+		let fs_module = self.context.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+			label: Some("Downscale Fragment"),
+			source: wgpu::ShaderSource::Wgsl(
+				r#"
+				@group(0) @binding(0) var artboard_texture: texture_2d<f32>;
+				@group(0) @binding(1) var linear_sampler: sampler;
+
+				@fragment
+				fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+					return textureSample(artboard_texture, linear_sampler, uv);
+				}
+			"#
+				.into(),
+			),
+		});
+
+		let translation = footprint.transform.translation;
+		let scale = footprint.transform.decompose_scale();
+
+		// Nothing to render
+		if (translation.x as u32) >= footprint.resolution.x || (translation.y as u32) >= footprint.resolution.y {
+			return Ok(());
+		}
+
+		let surface_texture = surface_inner.get_current_texture()?;
+		let mut encoder = self.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Surface Blit") });
+		/*{
+			encoder.copy_texture_to_texture(
+				wgpu::TexelCopyTextureInfo {
+					texture: &artboard_texture,
+					mip_level: 0,
+					origin: Origin3d { x: 0, y: 0, z: 0 },
+					aspect: wgpu::TextureAspect::All,
+				},
+				wgpu::TexelCopyTextureInfo {
+					texture: &surface_texture.texture,
+					mip_level: 0,
+					origin: Origin3d { x: 0 as u32, y: 0 as u32, z: 0 },
+					aspect: wgpu::TextureAspect::All,
+				},
+				wgpu::Extent3d {
+					width: clamp_max(footprint.resolution.x, artboard_dimensions.x as u32),
+					height: clamp_max(footprint.resolution.y, artboard_dimensions.y as u32),
+					depth_or_array_layers: 1,
+				},
+			);
+		}*/
+
+		{
+			let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+					view: &surface_texture.texture.create_view(&TextureViewDescriptor::default()),
+					resolve_target: None,
+					ops: wgpu::Operations {
+						load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+						store: wgpu::StoreOp::Store,
+					},
+				})],
+				occlusion_query_set: None,
+				timestamp_writes: None,
+				depth_stencil_attachment: None,
+				label: None,
+			});
+
+			render_pass.
+		}
+
+		self.context.queue.submit([encoder.finish()]);
+		surface_texture.present();
+
+		Ok(())
+	}
+
 	pub async fn render_vello_scene(&self, scene: &Scene, surface: &WgpuSurface, size: UVec2, context: &RenderContext, background: Color) -> Result<()> {
 		let mut guard = surface.surface.target_texture.lock().await;
 		let target_texture = if let Some(target_texture) = &*guard

@@ -174,8 +174,14 @@ async fn render_canvas(
 	render_params: RenderParams,
 ) -> RenderOutputType {
 	use graphene_application_io::{ImageTexture, SurfaceFrame};
+	use glam::DAffine2;
 
 	let footprint = render_config.viewport;
+	let untransformed_footprint = Footprint {
+		resolution: footprint.resolution,
+		quality: footprint.quality,
+		transform: DAffine2::default(),
+	};
 	let Some(exec) = editor.application_io.as_ref().unwrap().gpu_executor() else {
 		unreachable!("Attempted to render with Vello when no GPU executor is available");
 	};
@@ -187,19 +193,30 @@ async fn render_canvas(
 	let mut context = wgpu_executor::RenderContext::default();
 	data.render_to_vello(&mut child, Default::default(), &mut context, &render_params);
 
-	// TODO: Instead of applying the transform here, pass the transform during the translation to avoid the O(n) cost
-	scene.append(&child, Some(kurbo::Affine::new(footprint.transform.to_cols_array())));
-	//let canvas_transform = kurbo::Affine::new([0.1, 0., 0., 0.1, 0., 0.]);
-	//scene.append(&child, Some(canvas_transform));
-
-	log::debug!("Data Type: {}", std::any::type_name_of_val(&data));
+	log::debug!("Hello!");
 	if let Some(dimensions) = data.artboard_dimensions() {
-		log::debug!("Got dimensions: {:?}", dimensions);
-	}
+		scene.append(&child, Some(kurbo::Affine::new(untransformed_footprint.transform.to_cols_array())));
 
-	let mut background = Color::from_rgb8_srgb(0x22, 0x22, 0x22);
-	if !data.contains_artboard() && !render_config.hide_artboards {
-		background = Color::WHITE;
+		let mut background = Color::from_rgb8_srgb(0x22, 0x22, 0x22);
+		if !data.contains_artboard() && !render_config.hide_artboards {
+			background = Color::WHITE;
+		}
+		log::debug!("Rendering vello scene in pixels");
+		log::debug!("Footprint {:?}", footprint);
+		exec.render_vello_scene_view_mode_pixels(dimensions, &scene, &surface_handle, footprint, &context, background)
+			.await
+			.expect("Failed to render Vello scene");
+	} else {
+		scene.append(&child, Some(kurbo::Affine::new(footprint.transform.to_cols_array())));
+
+		let mut background = Color::from_rgb8_srgb(0x22, 0x22, 0x22);
+		if !data.contains_artboard() && !render_config.hide_artboards {
+			background = Color::WHITE;
+		}
+		log::debug!("Rendering vello scene standardly");
+		exec.render_vello_scene(&scene, &surface_handle, footprint.resolution, &context, background)
+			.await
+			.expect("Failed to render Vello scene");
 	}
 	if let Some(surface_handle) = surface_handle {
 		exec.render_vello_scene(&scene, &surface_handle, footprint.resolution, &context, background)
