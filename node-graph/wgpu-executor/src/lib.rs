@@ -14,9 +14,9 @@ pub use graphene_svg_renderer::RenderContext;
 use std::sync::{Arc, MutexGuard};
 use vello::low_level::Render;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
-use wgpu::util::TextureBlitter;
+use wgpu::util::{DeviceExt, TextureBlitter};
 use wgpu::wgt::TextureViewDescriptor;
-use wgpu::{Origin3d, SurfaceConfiguration, TextureAspect};
+use wgpu::{Origin3d, PipelineCompilationOptions, SurfaceConfiguration, TextureAspect};
 
 #[derive(dyn_any::DynAny)]
 pub struct WgpuExecutor {
@@ -71,6 +71,8 @@ impl WgpuExecutor {
 		context: &RenderContext,
 		background: Color,
 	) -> Result<()> {
+		// =========================== RENDER TO ARTBOARD ===========================
+
 		let artboard_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("artboard texture"),
 			size: wgpu::Extent3d {
@@ -113,6 +115,8 @@ impl WgpuExecutor {
 			}
 		}
 
+		// ========================== /RENDER TO ARTBOARD ===========================
+
 		let surface_inner = &surface.surface.inner;
 		let surface_caps = surface_inner.get_capabilities(&self.context.adapter);
 		surface_inner.configure(
@@ -128,6 +132,8 @@ impl WgpuExecutor {
 				desired_maximum_frame_latency: 2,
 			},
 		);
+
+		// =========================== ARTBOARD TO CANVAS PIPELINE ===========================
 
 		#[repr(C)]
 		#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -190,6 +196,135 @@ impl WgpuExecutor {
 			),
 		});
 
+		let bind_group_layout = self.context.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+			entries: &[
+				wgpu::BindGroupLayoutEntry {
+					// affine_transformation
+					binding: 0,
+					visibility: wgpu::ShaderStages::VERTEX,
+					ty: wgpu::BindingType::Buffer {
+						ty: wgpu::BufferBindingType::Uniform,
+						has_dynamic_offset: false,
+						min_binding_size: None,
+					},
+					count: None,
+				},
+				wgpu::BindGroupLayoutEntry {
+					// artboard_texture
+					binding: 1,
+					visibility: wgpu::ShaderStages::FRAGMENT,
+					ty: wgpu::BindingType::Texture {
+						multisampled: false,
+						view_dimension: wgpu::TextureViewDimension::D2,
+						sample_type: wgpu::TextureSampleType::Float { filterable: true },
+					},
+					count: None,
+				},
+				wgpu::BindGroupLayoutEntry {
+					// linear_sampler
+					binding: 2,
+					visibility: wgpu::ShaderStages::FRAGMENT,
+					ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+					count: None,
+				},
+			],
+			label: None,
+		});
+
+		let pipeline_layout = self.context.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+			label: None,
+			bind_group_layouts: &[&bind_group_layout],
+			push_constant_ranges: &[],
+		});
+
+		let vertex_buffer_layout = wgpu::VertexBufferLayout {
+			array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+			step_mode: wgpu::VertexStepMode::Vertex,
+			attributes: &[wgpu::VertexAttribute {
+				offset: 0,
+				shader_location: 0,
+				format: wgpu::VertexFormat::Float32x2,
+			}],
+		};
+
+		let pipeline = self.context.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+			label: Some("Artboard to Canvas Pipeline"),
+			layout: Some(&pipeline_layout),
+			vertex: wgpu::VertexState {
+				module: &vs_module,
+				entry_point: "vs_main".into(),
+				buffers: &[vertex_buffer_layout],
+				compilation_options: wgpu::PipelineCompilationOptions::default(),
+			},
+			fragment: Some(wgpu::FragmentState {
+				module: &fs_module,
+				entry_point: "fs_main".into(),
+				targets: &[Some(wgpu::ColorTargetState {
+					format: surface_caps.formats[0],
+					blend: None,
+					write_mask: wgpu::ColorWrites::ALL,
+				})],
+				compilation_options: wgpu::PipelineCompilationOptions::default(),
+			}),
+			primitive: wgpu::PrimitiveState::default(),
+			depth_stencil: None,
+			multisample: wgpu::MultisampleState::default(),
+			multiview: None,
+			cache: None,
+		});
+
+		// ========================= DOWNSCALING PIPELINE ===========================
+
+		let transform = Transform::from(footprint.transform);
+
+		let transform_buffer = self.context.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+			label: Some("Affine transform buffer"),
+			contents: bytemuck::cast_slice(&[transform]),
+			usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+		});
+
+		let linear_sampler = self.context.device.create_sampler(&wgpu::SamplerDescriptor {
+			address_mode_u: wgpu::AddressMode::ClampToEdge,
+			address_mode_v: wgpu::AddressMode::ClampToEdge,
+			address_mode_w: wgpu::AddressMode::ClampToEdge,
+			mag_filter: wgpu::FilterMode::Linear,
+			min_filter: wgpu::FilterMode::Linear,
+			mipmap_filter: wgpu::FilterMode::Nearest,
+			..Default::default()
+		});
+
+		let vertices = [
+			Vertex { positions: [-1.0, -1.0] }, // Bottom-left
+			Vertex { positions: [1.0, -1.0] },  // Bottom-right
+			Vertex { positions: [-1.0, 1.0] },  // Top-left
+			Vertex { positions: [1.0, 1.0] },   // Top-right
+		];
+
+		let vertex_buffer = self.context.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+			label: Some("Vertex Buffer"),
+			contents: bytemuck::cast_slice(&vertices),
+			usage: wgpu::BufferUsages::VERTEX,
+		});
+
+		let bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+			layout: &bind_group_layout,
+			entries: &[
+				wgpu::BindGroupEntry {
+					binding: 0,
+					resource: transform_buffer.as_entire_binding(), // Your transform uniform buffer
+				},
+				wgpu::BindGroupEntry {
+					binding: 1,
+					resource: wgpu::BindingResource::TextureView(&artboard_texture_view),
+				},
+				wgpu::BindGroupEntry {
+					binding: 2,
+					resource: wgpu::BindingResource::Sampler(&linear_sampler),
+				},
+			],
+			label: Some("Bind Group"),
+		});
+
 		let translation = footprint.transform.translation;
 		let scale = footprint.transform.decompose_scale();
 
@@ -200,27 +335,6 @@ impl WgpuExecutor {
 
 		let surface_texture = surface_inner.get_current_texture()?;
 		let mut encoder = self.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Surface Blit") });
-		/*{
-			encoder.copy_texture_to_texture(
-				wgpu::TexelCopyTextureInfo {
-					texture: &artboard_texture,
-					mip_level: 0,
-					origin: Origin3d { x: 0, y: 0, z: 0 },
-					aspect: wgpu::TextureAspect::All,
-				},
-				wgpu::TexelCopyTextureInfo {
-					texture: &surface_texture.texture,
-					mip_level: 0,
-					origin: Origin3d { x: 0 as u32, y: 0 as u32, z: 0 },
-					aspect: wgpu::TextureAspect::All,
-				},
-				wgpu::Extent3d {
-					width: clamp_max(footprint.resolution.x, artboard_dimensions.x as u32),
-					height: clamp_max(footprint.resolution.y, artboard_dimensions.y as u32),
-					depth_or_array_layers: 1,
-				},
-			);
-		}*/
 
 		{
 			let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -238,7 +352,10 @@ impl WgpuExecutor {
 				label: None,
 			});
 
-			render_pass.
+			render_pass.set_pipeline(&pipeline);
+			render_pass.set_bind_group(0, &bind_group, &[]);
+			render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+			render_pass.draw(0..4, 0..1);
 		}
 
 		self.context.queue.submit([encoder.finish()]);
