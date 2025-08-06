@@ -176,12 +176,9 @@ async fn render_canvas(
 	use graphene_application_io::{ImageTexture, SurfaceFrame};
 	use glam::DAffine2;
 
-	let footprint = render_config.viewport;
-	let untransformed_footprint = Footprint {
-		resolution: footprint.resolution,
-		quality: footprint.quality,
-		transform: DAffine2::default(),
-	};
+	let mut footprint = render_config.viewport;
+	footprint.resolution /= 2;
+
 	let Some(exec) = editor.application_io.as_ref().unwrap().gpu_executor() else {
 		unreachable!("Attempted to render with Vello when no GPU executor is available");
 	};
@@ -193,30 +190,11 @@ async fn render_canvas(
 	let mut context = wgpu_executor::RenderContext::default();
 	data.render_to_vello(&mut child, Default::default(), &mut context, &render_params);
 
-	log::debug!("Hello!");
-	if let Some(dimensions) = data.artboard_dimensions() {
-		scene.append(&child, Some(kurbo::Affine::new(untransformed_footprint.transform.to_cols_array())));
+	scene.append(&child, Some(kurbo::Affine::new(footprint.transform.to_cols_array())));
 
-		let mut background = Color::from_rgb8_srgb(0x22, 0x22, 0x22);
-		if !data.contains_artboard() && !render_config.hide_artboards {
-			background = Color::WHITE;
-		}
-		log::debug!("Rendering vello scene in pixels");
-		log::debug!("Footprint {:?}", footprint);
-		exec.render_vello_scene_view_mode_pixels(dimensions, &scene, &surface_handle, footprint, &context, background)
-			.await
-			.expect("Failed to render Vello scene");
-	} else {
-		scene.append(&child, Some(kurbo::Affine::new(footprint.transform.to_cols_array())));
-
-		let mut background = Color::from_rgb8_srgb(0x22, 0x22, 0x22);
-		if !data.contains_artboard() && !render_config.hide_artboards {
-			background = Color::WHITE;
-		}
-		log::debug!("Rendering vello scene standardly");
-		exec.render_vello_scene(&scene, &surface_handle, footprint.resolution, &context, background)
-			.await
-			.expect("Failed to render Vello scene");
+	let mut background = Color::from_rgb8_srgb(0x22, 0x22, 0x22);
+	if !data.contains_artboard() && !render_config.hide_artboards {
+		background = Color::WHITE;
 	}
 	if let Some(surface_handle) = surface_handle {
 		exec.render_vello_scene(&scene, &surface_handle, footprint.resolution, &context, background)
