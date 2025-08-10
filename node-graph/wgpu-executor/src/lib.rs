@@ -14,9 +14,10 @@ pub use graphene_svg_renderer::RenderContext;
 use std::sync::{Arc, MutexGuard};
 use vello::low_level::Render;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
+use web_sys::js_sys::Math::ceil;
 use wgpu::util::{DeviceExt, TextureBlitter};
 use wgpu::wgt::TextureViewDescriptor;
-use wgpu::{Origin3d, PipelineCompilationOptions, SurfaceConfiguration, TextureAspect};
+use wgpu::{Extent3d, Origin3d, PipelineCompilationOptions, SurfaceConfiguration, TexelCopyTextureInfoBase, TextureAspect};
 
 #[cfg(target_arch = "wasm32")]
 use web_sys;
@@ -65,41 +66,79 @@ unsafe impl StaticType for Surface {
 const VELLO_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 impl WgpuExecutor {
-	pub async fn render_vello_scene(&self, scene: &Scene, surface: &WgpuSurface, size: UVec2, context: &RenderContext, background: Color) -> Result<()> {
+	pub async fn render_vello_scene(&self, scene: &Scene, surface: &WgpuSurface, size: UVec2, surface_size: UVec2, context: &RenderContext, background: Color, footprint: &Footprint) -> Result<()> {
 		let mut guard = surface.surface.target_texture.lock().await;
-		let target_texture = if let Some(target_texture) = &*guard
-			&& target_texture.size == size
-		{
-			target_texture
-		} else {
-			let texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
-				label: None,
-				size: wgpu::Extent3d {
-					width: size.x,
-					height: size.y,
-					depth_or_array_layers: 1,
-				},
-				mip_level_count: 1,
-				sample_count: 1,
-				dimension: wgpu::TextureDimension::D2,
-				usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-				format: VELLO_SURFACE_FORMAT,
-				view_formats: &[],
-			});
-			let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-			*guard = Some(TargetTexture { size, view });
-			guard.as_ref().unwrap()
-		};
+
+		let texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
+			label: None,
+			size: wgpu::Extent3d {
+				width: size.x,
+				height: size.y,
+				depth_or_array_layers: 1,
+			},
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+			format: VELLO_SURFACE_FORMAT,
+			view_formats: &[],
+		});
+
+		let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+		let target_texture = TargetTexture { size, view };
+
+		let pixel_width = surface_size.x / size.x;
+		let pixel_height = surface_size.y / size.y;
+		let translation = footprint.transform.translation;
+
+		let intermediary_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
+			label: None,
+			size: wgpu::Extent3d {
+				width: surface_size.x + pixel_width,
+				height: surface_size.y + pixel_height,
+				depth_or_array_layers: 1,
+			},
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
+			format: VELLO_SURFACE_FORMAT,
+			view_formats: &[],
+		});
+
+		// let target_texture = if let Some(target_texture) = &*guard
+		// 	&& target_texture.size == size
+		// {
+		// 	target_texture
+		// } else {
+		// 	let texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
+		// 		label: None,
+		// 		size: wgpu::Extent3d {
+		// 			width: size.x,
+		// 			height: size.y,
+		// 			depth_or_array_layers: 1,
+		// 		},
+		// 		mip_level_count: 1,
+		// 		sample_count: 1,
+		// 		dimension: wgpu::TextureDimension::D2,
+		// 		usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+		// 		format: VELLO_SURFACE_FORMAT,
+		// 		view_formats: &[],
+		// 	});
+		// 	let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+		// 	*guard = Some(TargetTexture { size, view });
+		// 	guard.as_ref().unwrap()
+		// };
 
 		let surface_inner = &surface.surface.inner;
 		let surface_caps = surface_inner.get_capabilities(&self.context.adapter);
 		surface_inner.configure(
 			&self.context.device,
 			&SurfaceConfiguration {
-				usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
+				usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST,
 				format: VELLO_SURFACE_FORMAT,
-				width: size.x,
-				height: size.y,
+				width: surface_size.x,
+				height: surface_size.y,
 				present_mode: surface_caps.present_modes[0],
 				alpha_mode: wgpu::CompositeAlphaMode::Opaque,
 				view_formats: vec![],
@@ -136,12 +175,52 @@ impl WgpuExecutor {
 
 		let surface_texture = surface_inner.get_current_texture()?;
 		let mut encoder = self.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Surface Blit") });
+
 		surface.surface.blitter.copy(
 			&self.context.device,
 			&mut encoder,
 			&target_texture.view,
-			&surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default()),
+			&intermediary_texture.create_view(&wgpu::TextureViewDescriptor::default()),
 		);
+
+		let x_offset = translation.x / pixel_width as f64;
+		let x_offset = (x_offset as u32) as f64 + 1. - x_offset;
+		let x_offset = pixel_width * x_offset as u32;
+		let y_offset = translation.y / pixel_width as f64;
+		let y_offset = (y_offset as u32) as f64 + 1. - y_offset;
+		let y_offset = pixel_height * y_offset as u32;
+
+		#[cfg(target_arch = "wasm32")]
+		web_sys::console::log_2(&format!("x_offset: {}", x_offset).into(), &format!("y_offset: {}", y_offset).into());
+
+		let source = TexelCopyTextureInfoBase {
+			texture: &intermediary_texture,
+			mip_level: 0,
+			origin: Origin3d {
+				x: pixel_width.saturating_sub(x_offset),
+				y: pixel_height.saturating_sub(y_offset),
+				z: 0,
+			},
+			aspect: TextureAspect::All,
+		};
+
+		let destination = TexelCopyTextureInfoBase {
+			texture: &surface_texture.texture,
+			mip_level: 0,
+			origin: Origin3d::ZERO,
+			aspect: TextureAspect::All,
+		};
+
+		encoder.copy_texture_to_texture(
+			source,
+			destination,
+			Extent3d {
+				width: surface_size.x,
+				height: surface_size.y,
+				depth_or_array_layers: 1,
+			},
+		);
+
 		self.context.queue.submit([encoder.finish()]);
 		surface_texture.present();
 

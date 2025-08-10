@@ -174,10 +174,17 @@ async fn render_canvas(
 	render_params: RenderParams,
 ) -> RenderOutputType {
 	use graphene_application_io::{ImageTexture, SurfaceFrame};
-	use glam::DAffine2;
 
 	let mut footprint = render_config.viewport;
-	footprint.resolution /= 2;
+	let viewport_resolution = footprint.resolution;
+	let modifier = (1. / footprint.scale().x) as f32;
+	log::debug!("Footprint {footprint:?}");
+	log::debug!("Scale {:?}", footprint.scale());
+	log::debug!("Modifier {modifier:?}");
+	footprint.resolution = (footprint.resolution.as_vec2() * modifier).as_uvec2();
+	footprint.transform = glam::DAffine2::from_scale_angle_translation(footprint.scale() * modifier as f64, 0., (footprint.transform.translation.as_vec2() * modifier).as_dvec2());
+	log::debug!("[Modified] Footprint {footprint:?}");
+	log::debug!("[Modified] Scale {:?}", footprint.scale());
 
 	let Some(exec) = editor.application_io.as_ref().unwrap().gpu_executor() else {
 		unreachable!("Attempted to render with Vello when no GPU executor is available");
@@ -197,7 +204,7 @@ async fn render_canvas(
 		background = Color::WHITE;
 	}
 	if let Some(surface_handle) = surface_handle {
-		exec.render_vello_scene(&scene, &surface_handle, footprint.resolution, &context, background)
+		exec.render_vello_scene(&scene, &surface_handle, footprint.resolution, viewport_resolution, &context, background, &footprint)
 			.await
 			.expect("Failed to render Vello scene");
 

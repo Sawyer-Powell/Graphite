@@ -3,12 +3,17 @@ use std::process::Command;
 const GRAPHITE_RELEASE_SERIES: &str = "Alpha 4";
 
 fn main() {
+	// Only rebuild when git files change to avoid unnecessary rebuilds
+	println!("cargo:rerun-if-changed=../.git/HEAD");
+	println!("cargo:rerun-if-changed=../.git/refs/heads");
+	println!("cargo:rerun-if-env-changed=GITHUB_HEAD_REF");
+
 	// Execute a Git command for its stdout. Early exit if it fails for any of the possible reasons.
 	let try_git_command = |args: &[&str]| -> Option<String> {
 		let git_output = Command::new("git").args(args).output().ok()?;
 		let maybe_empty = String::from_utf8(git_output.stdout).ok()?;
 		let command_result = (!maybe_empty.is_empty()).then_some(maybe_empty)?;
-		Some(command_result)
+		Some(command_result.trim().to_string())
 	};
 	// Execute a Git command for its output. Return "unknown" if it fails for any of the possible reasons.
 	let git_command = |args| -> String { try_git_command(args).unwrap_or_else(|| String::from("unknown")) };

@@ -45,8 +45,14 @@ resolver = "2"
 [workspace.dependencies]
 # Local dependencies
 bezier-rs = { path = "libraries/bezier-rs", features = ["dyn-any", "serde"] }
-dyn-any = { path = "libraries/dyn-any", features = ["derive", "glam", "reqwest", "log-bad-types", "rc"] }
-preprocessor = { path = "node-graph/preprocessor"}
+dyn-any = { path = "libraries/dyn-any", features = [
+	"derive",
+	"glam",
+	"reqwest",
+	"log-bad-types",
+	"rc",
+] }
+preprocessor = { path = "node-graph/preprocessor" }
 math-parser = { path = "libraries/math-parser" }
 path-bool = { path = "libraries/path-bool" }
 graphene-application-io = { path = "node-graph/gapplication-io" }
@@ -80,7 +86,7 @@ convert_case = "0.7"
 derivative = "2.2"
 thiserror = "2"
 anyhow = "1.0"
-proc-macro2 = { version = "1", features = [ "span-locations" ] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1.0"
 axum = "0.8"
 chrono = "0.4"
@@ -122,9 +128,17 @@ resvg = "0.44"
 usvg = "0.44"
 rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 rand_chacha = "0.9"
-glam = { version = "0.29", default-features = false, features = ["serde", "scalar-math", "debug-glam-assert"] }
+glam = { version = "0.29", default-features = false, features = [
+	"serde",
+	"scalar-math",
+	"debug-glam-assert",
+] }
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+image = { version = "0.25", default-features = false, features = [
+	"png",
+	"jpeg",
+	"bmp",
+] }
 parley = "0.5.0"
 skrifa = "0.32.0"
 pretty_assertions = "1.4.1"
@@ -152,7 +166,10 @@ kurbo = { version = "0.11.0", features = ["serde"] }
 petgraph = { version = "0.7.1", default-features = false, features = [
 	"graphmap",
 ] }
-half = { version = "2.4.1", default-features = false, features = ["bytemuck", "serde"] }
+half = { version = "2.4.1", default-features = false, features = [
+	"bytemuck",
+	"serde",
+] }
 tinyvec = { version = "1", features = ["std"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 iai-callgrind = { version = "0.12.3" }
@@ -166,13 +183,19 @@ tracing = "0.1.41"
 
 [profile.dev]
 opt-level = 1
+# Increase codegen units for faster parallel compilation
+codegen-units = 256
+# Enable incremental compilation
+incremental = true
+# Use faster debug info format
+debug = 1
 
 [profile.dev.package]
 graphite-editor = { opt-level = 1 }
 graphene-core-shaders = { opt-level = 1 }
 graphene-core = { opt-level = 1 }
 graphene-std = { opt-level = 1 }
-interpreted-executor = { opt-level = 1 } # This is a mitigation for https://github.com/rustwasm/wasm-pack/issues/981 which is needed because the node_registry function is too large
+interpreted-executor = { opt-level = 1 }  # This is a mitigation for https://github.com/rustwasm/wasm-pack/issues/981 which is needed because the node_registry function is too large
 graphite-proc-macros = { opt-level = 1 }
 image = { opt-level = 2 }
 rustc-hash = { opt-level = 3 }
@@ -183,7 +206,19 @@ syn = { opt-level = 1 }
 [profile.release]
 lto = "thin"
 debug = true
+# Optimize codegen units for release builds
+codegen-units = 1
+# Enable panic = "abort" for smaller binaries and faster compilation
+panic = "abort"
 
 [profile.profiling]
 inherits = "release"
 debug = true
+
+# Fast development profile for quick iteration
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 0
+debug = 0
+incremental = true
+codegen-units = 256
